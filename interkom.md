@@ -42,6 +42,7 @@
             flex-direction: column;
             gap: 20px;
             text-align: center;
+            z-index: 20;
         }
 
         .btn-room {
@@ -70,6 +71,20 @@
             justify-content: center;
             width: 100%;
             height: 100%;
+            position: relative; /* Untuk canvas overlay */
+        }
+
+        /* Canvas Visualizer Spektrum */
+        #visualizer {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            height: 35%; /* Memakan 35% layar bawah */
+            z-index: 1; /* Di belakang tombol */
+            pointer-events: none; /* Tidak mengganggu klik */
+            opacity: 0.8;
+            transition: opacity 0.3s ease;
         }
 
         .status-text {
@@ -79,6 +94,7 @@
             text-transform: uppercase;
             letter-spacing: 1px;
             transition: color 0.3s ease;
+            z-index: 10;
         }
 
         /* Tombol PTT Utama */
@@ -102,6 +118,7 @@
             justify-content: center;
             text-align: center;
             padding: 20px;
+            z-index: 10; /* Di atas canvas visualizer */
         }
 
         #ptt-btn:active, .ptt-active {
@@ -129,6 +146,7 @@
             color: #8e8e93;
             letter-spacing: 2px;
             font-weight: 600;
+            z-index: 10;
         }
     </style>
 </head>
@@ -142,6 +160,7 @@
     </div>
 
     <div id="intercom-screen">
+        <canvas id="visualizer"></canvas>
         <div id="room-info"></div>
         <div class="status-text" id="status-display" style="color: var(--color-searching);">MENUNGGU PILIHAN...</div>
         <button id="ptt-btn" class="status-searching">MENCARI...</button>
@@ -159,10 +178,93 @@
         const statusDisplay = document.getElementById('status-display');
         const remoteAudio = document.getElementById('remote-audio');
         const roomInfo = document.getElementById('room-info');
+        
+        // Setup Web Audio API & Visualizer
+        const canvas = document.getElementById('visualizer');
+        const canvasCtx = canvas.getContext('2d');
+        let audioCtx;
+        let analyser;
+        let localSource;
+        let remoteSource;
 
         let isConnected = false;
         let isTalking = false;
         let autoReconnectInterval = null;
+
+        // Inisiasi Audio Context dan Analyser
+        function initAudioContext() {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                analyser = audioCtx.createAnalyser();
+                // fftSize menentukan jumlah bar frekuensi (256 => 128 bar data)
+                analyser.fftSize = 256;
+                // Mulai animasi loop
+                setupCanvasResize();
+                drawVisualizer();
+            }
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+        }
+
+        function setupCanvasResize() {
+            const resize = () => {
+                canvas.width = window.innerWidth;
+                canvas.height = window.innerHeight * 0.35; // 35% dari tinggi layar
+            };
+            window.addEventListener('resize', resize);
+            resize(); // inisiasi pertama
+        }
+
+        // Fungsi menggambar spektrum ke kanvas
+        function drawVisualizer() {
+            requestAnimationFrame(drawVisualizer);
+
+            if (!analyser) return;
+
+            const bufferLength = analyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+            
+            // Mengambil amplitudo frekuensi
+            analyser.getByteFrequencyData(dataArray);
+
+            // Bersihkan kanvas di tiap frame
+            canvasCtx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Lebar 1 bar
+            const barWidth = (canvas.width / bufferLength) * 2.5;
+            let barHeight;
+            let x = 0;
+
+            for (let i = 0; i < bufferLength; i++) {
+                barHeight = dataArray[i]; // nilai 0-255
+
+                // Tentukan warna gradient berdasarkan status sekarang (Mencari, Standby, Bicara)
+                let r, g, b;
+                if (isTalking) {
+                    // Hijau terang saat bicara (local output)
+                    r = 52 + (barHeight/3); g = 199; b = 89;
+                } else if (isConnected) {
+                    // Merah/Biru keren saat mendengarkan (remote output)
+                    r = barHeight + 50; g = 50; b = 250 - (barHeight/2);
+                } else {
+                    // Oranye mati saat mencari
+                    r = 255; g = 149; b = 0;
+                    barHeight = barHeight * 0.3; // Kecilkan amplituda statik
+                }
+
+                // Efek glow minimalis
+                canvasCtx.fillStyle = `rgba(${r}, ${g}, ${b}, ${barHeight / 255 + 0.1})`;
+                
+                // Tinggi visual pada layar
+                let visualHeight = (barHeight / 255) * canvas.height;
+                
+                // Gambar bar dari bawah ke atas
+                canvasCtx.fillRect(x, canvas.height - visualHeight, barWidth, visualHeight);
+
+                x += barWidth + 1;
+            }
+        }
 
         async function initIntercom(selectedId, peerTargetId) {
             myId = selectedId;
@@ -170,6 +272,9 @@
 
             selectionScreen.style.display = 'none';
             intercomScreen.style.display = 'flex';
+            
+            // Menyiapkan AudioContext pada "gestur user pertama" (klik tombol ruang)
+            initAudioContext();
             
             let displayName = myId.includes("A") ? "RUANG A" : "RUANG B";
             roomInfo.innerText = "SESI AKTIF: " + displayName;
@@ -182,7 +287,7 @@
                         echoCancellation: true,
                         noiseSuppression: true,
                         autoGainControl: true,
-                        channelCount: 1, // Mono cukup untuk suara
+                        channelCount: 1, 
                         sampleRate: 48000
                     },
                     video: false
@@ -191,6 +296,9 @@
                 // Set mic ke mute secara default (Mode PTT)
                 muteMic();
 
+                // Sambungkan localStream ke Analyser Node agar divisualisasikan saat PTT ditekan
+                localSource = audioCtx.createMediaStreamSource(localStream);
+                
                 setupPeer();
                 setupPTT();
 
@@ -205,11 +313,19 @@
             if (localStream) {
                 localStream.getAudioTracks().forEach(track => track.enabled = false);
             }
+            if (localSource && isTalking === false) {
+                localSource.disconnect();
+            }
         }
 
         function unmuteMic() {
             if (localStream) {
                 localStream.getAudioTracks().forEach(track => track.enabled = true);
+            }
+            if (localSource && analyser) {
+                // Pastikan remote ter-disconnect dari analyser, lalu kita connect local
+                if (remoteSource) remoteSource.disconnect();
+                localSource.connect(analyser); 
             }
         }
 
@@ -264,6 +380,13 @@
                 console.log("Koneksi audio P2P berhasil dibuat!");
                 remoteAudio.srcObject = remoteStream;
                 
+                // Menghubungkan output suara lawan ke Visualizer Spektrum
+                if (audioCtx && analyser) {
+                    if (remoteSource) remoteSource.disconnect();
+                    remoteSource = audioCtx.createMediaStreamSource(remoteStream);
+                    remoteSource.connect(analyser);
+                }
+
                 // Atur agar audio auto play (safari butuh catch promise)
                 remoteAudio.play().catch(e => console.warn("Autoplay ter-block:", e));
 
@@ -305,6 +428,11 @@
 
                 isTalking = false;
                 muteMic();
+                
+                // Kembali dengarkan spektrum lawan (jika ada lawan)
+                if (localSource) localSource.disconnect();
+                if (remoteSource && analyser) remoteSource.connect(analyser);
+
                 updateStatus('TERHUBUNG - STANDBY', 'standby', 'TAHAN UNTUK<br>BICARA');
                 pttBtn.classList.remove('ptt-active');
             };
