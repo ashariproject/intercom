@@ -1,4 +1,4 @@
-const CACHE_NAME = 'ag-interkom-v1';
+const CACHE_NAME = 'ag-interkom-v2';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
